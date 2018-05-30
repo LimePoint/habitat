@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Chef Software Inc. and/or applicable contributors
+// Copyright (c) 2017 Chef Software Inc. and/or applicable contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,58 +19,18 @@
 //! administrator reverses the decision.
 
 use std::cmp::Ordering;
-use std::ops::{Deref, DerefMut};
 
-use protobuf::{self, Message};
+use bytes::BytesMut;
+use prost::Message;
 
-use error::Result;
-use message::swim::{Departure as ProtoDeparture, Rumor as ProtoRumor,
-                    Rumor_Type as ProtoRumor_Type};
-use rumor::Rumor;
+use error::{Error, Result};
+use protocol::{self,
+               swim::{Departure as ProtoDeparture, Rumor as ProtoRumor}};
+use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Departure(ProtoRumor);
-
-impl PartialOrd for Departure {
-    fn partial_cmp(&self, other: &Departure) -> Option<Ordering> {
-        if self.get_member_id() != other.get_member_id() {
-            None
-        } else {
-            Some(self.get_member_id().cmp(&other.get_member_id()))
-        }
-    }
-}
-
-impl PartialEq for Departure {
-    fn eq(&self, other: &Departure) -> bool {
-        self.get_member_id() == other.get_member_id()
-    }
-}
-
-impl From<ProtoRumor> for Departure {
-    fn from(pr: ProtoRumor) -> Departure {
-        Departure(pr)
-    }
-}
-
-impl From<Departure> for ProtoRumor {
-    fn from(departure: Departure) -> ProtoRumor {
-        departure.0
-    }
-}
-
-impl Deref for Departure {
-    type Target = ProtoDeparture;
-
-    fn deref(&self) -> &ProtoDeparture {
-        self.0.get_departure()
-    }
-}
-
-impl DerefMut for Departure {
-    fn deref_mut(&mut self) -> &mut ProtoDeparture {
-        self.0.mut_departure()
-    }
+pub struct Departure {
+    pub member_id: String,
 }
 
 impl Departure {
@@ -78,23 +38,41 @@ impl Departure {
     where
         U: ToString,
     {
-        let mut rumor = ProtoRumor::new();
-        rumor.set_from_id(String::from("butterflyclient"));
-        rumor.set_field_type(ProtoRumor_Type::Departure);
+        Departure {
+            member_id: member_id.to_string(),
+        }
+    }
+}
 
-        let mut proto = ProtoDeparture::new();
-        proto.set_member_id(member_id.to_string());
-        rumor.set_departure(proto);
-        Departure(rumor)
+impl protocol::Message for Departure {
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let rumor = ProtoRumor::decode(bytes)?;
+        let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
+            RumorPayload::Departure(payload) => payload,
+            _ => panic!("from-bytes departure"),
+        };
+        Ok(Departure {
+            member_id: rumor.member_id.ok_or(Error::ProtocolMismatch("member-id"))?,
+        })
+    }
+
+    fn write_to_bytes(&self) -> Result<Vec<u8>> {
+        let payload = ProtoDeparture {
+            member_id: Some(self.member_id),
+        };
+        let rumor = ProtoRumor {
+            type_: self.kind() as i32,
+            tag: Vec::default(),
+            from_id: "butterflyclient".to_string(),
+            payload: Some(RumorPayload::Departure(payload)),
+        };
+        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
+        rumor.encode(&mut buf)?;
+        Ok(buf.to_vec())
     }
 }
 
 impl Rumor for Departure {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = protobuf::parse_from_bytes::<ProtoRumor>(bytes)?;
-        Ok(Departure::from(rumor))
-    }
-
     fn merge(&mut self, other: Departure) -> bool {
         if *self >= other {
             false
@@ -103,20 +81,32 @@ impl Rumor for Departure {
         }
     }
 
-    fn kind(&self) -> ProtoRumor_Type {
-        ProtoRumor_Type::Departure
+    fn kind(&self) -> RumorType {
+        RumorType::Departure
     }
 
     fn id(&self) -> &str {
-        self.get_member_id()
+        &self.member_id
     }
 
     fn key(&self) -> &str {
         "departure"
     }
+}
 
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(try!(self.0.write_to_bytes()))
+impl PartialOrd for Departure {
+    fn partial_cmp(&self, other: &Departure) -> Option<Ordering> {
+        if self.member_id != other.member_id {
+            None
+        } else {
+            Some(self.member_id.cmp(&other.member_id))
+        }
+    }
+}
+
+impl PartialEq for Departure {
+    fn eq(&self, other: &Departure) -> bool {
+        self.member_id == other.member_id
     }
 }
 

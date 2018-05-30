@@ -1,4 +1,5 @@
 syntax = "proto2";
+package butterfly.swim;
 
 message Member {
   optional string id = 1;
@@ -74,7 +75,7 @@ message SysInfo {
   optional string gossip_ip = 3 [default = "127.0.0.1"];
   optional uint32 gossip_port = 4;
   optional string http_gateway_ip = 5 [default = "127.0.0.1"];
-  optional uint32 http_gateway_port = 6; 
+  optional uint32 http_gateway_port = 6;
   optional string ctl_gateway_ip = 7 [default = "127.0.0.1"];
   optional uint32 ctl_gateway_port = 8 [default = 9632];
 }
@@ -123,7 +124,7 @@ message Rumor {
 }
 
 message Wire {
-  optional bool encrypted = 1;
+  optional bool encrypted = 1 [default = false];
   optional bytes nonce = 2;
   optional bytes payload = 3;
 }

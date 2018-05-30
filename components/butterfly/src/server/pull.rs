@@ -20,10 +20,13 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
-use protobuf;
+use prost::Message;
 use zmq;
 
+use error::Error;
 use message::swim::{Rumor, Rumor_Type};
+use protocol::swim::Rumor as ProtoRumor;
+use rumor::{election::ElectionUpdate, RumorPayload, RumorType};
 use server::Server;
 use trace::TraceKind;
 use ZMQ_CONTEXT;
@@ -72,51 +75,55 @@ impl Pull {
                 Err(e) => {
                     // NOTE: In the future, we might want to blacklist people who send us
                     // garbage all the time.
-                    error!("Error parsing protobuf: {:?}", e);
+                    error!("Error parsing protocol message: {:?}", e);
                     continue;
                 }
             };
-            let mut proto: Rumor = match protobuf::parse_from_bytes(&payload) {
+            let mut proto = match ProtoRumor::decode(&payload).map_err(Error::from) {
                 Ok(proto) => proto,
                 Err(e) => {
-                    error!("Error parsing protobuf: {:?}", e);
+                    error!("Error parsing protocol message: {:?}", e);
                     continue 'recv;
                 }
             };
-            if self.server.check_blacklist(proto.get_from_id()) {
+            if self.server.check_blacklist(&proto.from_id) {
                 warn!(
                     "Not processing message from {} - it is blacklisted",
-                    proto.get_from_id()
+                    proto.from_id
                 );
                 continue 'recv;
             }
-            trace_it!(GOSSIP: &self.server, TraceKind::RecvRumor, proto.get_from_id(), &proto);
-            match proto.get_field_type() {
-                Rumor_Type::Member => {
-                    let member = proto.mut_member().take_member().into();
-                    let health = proto.mut_member().get_health().into();
-                    self.server.insert_member_from_rumor(member, health);
+            trace_it!(GOSSIP: &self.server, TraceKind::RecvRumor, &proto.from_id, &proto);
+            match proto.payload {
+                RumorPayload::Membership(membership) => {
+                    self.server
+                        .insert_member_from_rumor(membership.member, membership.health);
                 }
-                Rumor_Type::Service => {
-                    self.server.insert_service(proto.into());
+                RumorPayload::Service(service) => {
+                    self.server.insert_service(service);
                 }
-                Rumor_Type::ServiceConfig => {
-                    self.server.insert_service_config(proto.into());
+                RumorPayload::ServiceConfig(service_config) => {
+                    self.server.insert_service_config(service_config);
                 }
-                Rumor_Type::ServiceFile => {
-                    self.server.insert_service_file(proto.into());
+                RumorPayload::ServiceFile(service_file) => {
+                    self.server.insert_service_file(service_file);
                 }
-                Rumor_Type::Election => {
-                    self.server.insert_election(proto.into());
-                }
-                Rumor_Type::ElectionUpdate => {
-                    self.server.insert_update_election(proto.into());
-                }
-                Rumor_Type::Departure => {
-                    self.server.insert_departure(proto.into());
-                }
-                Rumor_Type::Fake | Rumor_Type::Fake2 => {
-                    debug!("Nothing to do for fake rumor types")
+                RumorPayload::Election(election) => match proto.type_ {
+                    RumorType::Election => self.server.insert_election(election),
+                    RumorType::ElectionUpdate => {
+                        // Ideally the election update rumor is it's own thing and not a tagged
+                        // derivation of election. It originally made sense to sort of "inherit"
+                        // from `Election`, but once we upgraded to the Prost implementation of
+                        // Protobuf we got the ability to pack a Rumor's payload as a Rust
+                        // enumeration.  This essentially makes the `type` field moot, so now this
+                        // looks a bit out of place.
+                        self.server
+                            .insert_update_election(ElectionUpdate::from(election));
+                    }
+                    _ => panic!("unknown election proto type"),
+                },
+                RumorPayload::Departure(departure) => {
+                    self.server.insert_departure(departure);
                 }
             }
         }

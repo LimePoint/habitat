@@ -1,10 +1,11 @@
 mod protocols {
     extern crate pkg_config;
+    extern crate prost;
+    extern crate prost_build;
 
     use std::env;
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
 
     pub fn generate_if_feature_enabled() {
         if env::var("CARGO_FEATURE_PROTOCOLS").is_ok() {
@@ -13,31 +14,40 @@ mod protocols {
     }
 
     fn generate_protocols() {
-        let prefix = match env::var("PROTOBUF_PREFIX").ok() {
-            Some(prefix) => prefix,
-            None => match pkg_config::get_variable("protobuf", "prefix") {
-                Ok(prefix) => prefix,
-                Err(msg) => panic!("Unable to locate protobuf, err={:?}", msg),
-            },
-        };
-
-        let out_dir = r"src/message";
-        let cmd = Command::new(format!("{}/bin/protoc", prefix))
-            .arg("--rust_out")
-            .arg(out_dir)
-            .args(&protocol_files())
-            .output();
-        match cmd {
-            Ok(out) => {
-                if !out.status.success() {
-                    panic!("{:?}", out)
-                }
-            }
-            Err(e) => panic!("{}", e),
+        let mut config = prost_build::Config::new();
+        config.type_attribute(".", "#[derive(Serialize, Deserialize, Hash)]");
+        config
+            .compile_protos(&protocol_files(), &protocol_includes())
+            .expect("protocols");
+        for file in generated_files() {
+            fs::rename(
+                &file,
+                format!(
+                    "src/generated/{}",
+                    file.file_name().unwrap().to_string_lossy()
+                ),
+            ).unwrap();
         }
     }
 
-    fn protocol_files() -> Vec<PathBuf> {
+    fn generated_files() -> Vec<PathBuf> {
+        let mut files = vec![];
+        for entry in fs::read_dir(env::var("OUT_DIR").unwrap()).unwrap() {
+            let file = entry.unwrap();
+            if file.file_name().to_str().unwrap().ends_with(".rs") {
+                if file.metadata().unwrap().is_file() {
+                    files.push(file.path());
+                }
+            }
+        }
+        files
+    }
+
+    fn protocol_includes() -> Vec<String> {
+        vec!["protocols".to_string()]
+    }
+
+    fn protocol_files() -> Vec<String> {
         let mut files = vec![];
         for entry in fs::read_dir("protocols").unwrap() {
             let file = entry.unwrap();
@@ -46,7 +56,7 @@ mod protocols {
                 continue;
             }
             if file.metadata().unwrap().is_file() {
-                files.push(file.path());
+                files.push(file.path().to_string_lossy().into_owned());
             }
         }
         files

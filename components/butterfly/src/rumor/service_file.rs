@@ -18,63 +18,42 @@
 
 use std::cmp::Ordering;
 use std::mem;
-use std::ops::{Deref, DerefMut};
 
+use bytes::BytesMut;
 use habitat_core::crypto::{default_cache_key_path, BoxKeyPair};
 use habitat_core::service::ServiceGroup;
-use protobuf::{self, Message};
+use prost::Message;
 
-use error::Result;
-use message::swim::{Rumor as ProtoRumor, Rumor_Type as ProtoRumor_Type,
-                    ServiceFile as ProtoServiceFile};
-use rumor::Rumor;
+use error::{Error, Result};
+use protocol::{self,
+               swim::{Rumor as ProtoRumor, ServiceFile as ProtoServiceFile}};
+use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ServiceFile(ProtoRumor);
+pub struct ServiceFile {
+    pub from_id: String,
+    pub service_group: ServiceGroup,
+    pub incarnation: u64,
+    pub encrypted: bool,
+    pub filename: String,
+    pub body: Vec<u8>,
+}
 
 impl PartialOrd for ServiceFile {
     fn partial_cmp(&self, other: &ServiceFile) -> Option<Ordering> {
-        if self.get_service_group() != other.get_service_group() {
+        if self.service_group != other.service_group {
             None
         } else {
-            Some(self.get_incarnation().cmp(&other.get_incarnation()))
+            Some(self.incarnation.cmp(&other.incarnation))
         }
     }
 }
 
 impl PartialEq for ServiceFile {
     fn eq(&self, other: &ServiceFile) -> bool {
-        self.get_service_group() == other.get_service_group()
-            && self.get_incarnation() == other.get_incarnation()
-            && self.get_encrypted() == other.get_encrypted()
-            && self.get_filename() == other.get_filename()
-            && self.get_body() == other.get_body()
-    }
-}
-
-impl From<ProtoRumor> for ServiceFile {
-    fn from(pr: ProtoRumor) -> ServiceFile {
-        ServiceFile(pr)
-    }
-}
-
-impl From<ServiceFile> for ProtoRumor {
-    fn from(service_file: ServiceFile) -> ProtoRumor {
-        service_file.0
-    }
-}
-
-impl Deref for ServiceFile {
-    type Target = ProtoServiceFile;
-
-    fn deref(&self) -> &ProtoServiceFile {
-        self.0.get_service_file()
-    }
-}
-
-impl DerefMut for ServiceFile {
-    fn deref_mut(&mut self) -> &mut ProtoServiceFile {
-        self.0.mut_service_file()
+        self.service_group == other.service_group && self.incarnation == other.incarnation
+            && self.encrypted == other.encrypted && self.filename == other.filename
+            && self.body == other.body
     }
 }
 
@@ -90,49 +69,76 @@ impl ServiceFile {
         S1: Into<String>,
         S2: Into<String>,
     {
-        let mut rumor = ProtoRumor::new();
-        let from_id = member_id.into();
-        rumor.set_from_id(from_id);
-        rumor.set_field_type(ProtoRumor_Type::ServiceFile);
-
-        let mut proto = ProtoServiceFile::new();
-        proto.set_service_group(format!("{}", service_group));
-        proto.set_incarnation(0);
-        proto.set_filename(filename.into());
-        proto.set_body(body);
-
-        rumor.set_service_file(proto);
-        ServiceFile(rumor)
+        ServiceFile {
+            from_id: member_id.into(),
+            service_group: service_group,
+            incarnation: 0,
+            encrypted: false,
+            filename: filename.into(),
+            body: body,
+        }
     }
 
     /// Encrypt the contents of the service file
     pub fn encrypt(&mut self, user_pair: &BoxKeyPair, service_pair: &BoxKeyPair) -> Result<()> {
-        let body = self.take_body();
-        let encrypted_body = user_pair.encrypt(&body, Some(service_pair))?;
-        self.set_body(encrypted_body);
-        self.set_encrypted(true);
+        self.body = user_pair.encrypt(&self.body, Some(service_pair))?;
+        self.encrypted = true;
         Ok(())
     }
 
     /// Return the body of the service file as a stream of bytes. Always returns a new copy, due to
     /// the fact that we might be encrypted.
     pub fn body(&self) -> Result<Vec<u8>> {
-        if self.get_encrypted() {
-            let bytes =
-                BoxKeyPair::decrypt_with_path(self.get_body(), &default_cache_key_path(None))?;
+        if self.encrypted {
+            let bytes = BoxKeyPair::decrypt_with_path(&self.body, &default_cache_key_path(None))?;
             Ok(bytes)
         } else {
-            Ok(self.get_body().to_vec())
+            Ok(self.body.to_vec())
         }
     }
 }
 
-impl Rumor for ServiceFile {
+impl protocol::Message for ServiceFile {
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = protobuf::parse_from_bytes::<ProtoRumor>(bytes)?;
-        Ok(ServiceFile::from(rumor))
+        let rumor = ProtoRumor::decode(bytes)?;
+        let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
+            RumorPayload::ServiceFile(payload) => payload,
+            _ => panic!("from-bytes service-config"),
+        };
+        Ok(ServiceFile {
+            from_id: rumor.from_id.ok_or(Error::ProtocolMismatch("from-id"))?,
+            service_group: rumor
+                .service_group
+                .ok_or(Error::ProtocolMismatch("service-group"))?
+                .and_then(ServiceGroup::from_str)?,
+            incarnation: rumor.incarnation.unwrap_or(0),
+            encrypted: rumor.initialized.unwrap_or(false),
+            filename: rumor.filename.ok_or(Error::ProtocolMismatch("filename"))?,
+            body: rumor.body.unwrap_or_default(),
+        })
     }
 
+    fn write_to_bytes(&self) -> Result<Vec<u8>> {
+        let payload = ProtoServiceFile {
+            service_group: Some(self.service_group.to_string()),
+            incarnation: Some(self.incarnation),
+            encrypted: Some(self.encrypted),
+            filename: Some(self.filename),
+            body: Some(self.body),
+        };
+        let rumor = ProtoRumor {
+            type_: self.kind() as i32,
+            tag: Vec::default(),
+            from_id: self.member_id.clone(),
+            payload: Some(RumorPayload::ServiceFile(payload)),
+        };
+        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
+        rumor.encode(&mut buf)?;
+        Ok(buf.to_vec())
+    }
+}
+
+impl Rumor for ServiceFile {
     /// Follows a simple pattern; if we have a newer incarnation than the one we already have, the
     /// new one wins. So far, these never change.
     fn merge(&mut self, mut other: ServiceFile) -> bool {
@@ -144,20 +150,16 @@ impl Rumor for ServiceFile {
         }
     }
 
-    fn kind(&self) -> ProtoRumor_Type {
-        ProtoRumor_Type::ServiceFile
+    fn kind(&self) -> RumorType {
+        RumorType::ServiceFile
     }
 
     fn id(&self) -> &str {
-        self.get_filename()
+        &self.filename
     }
 
     fn key(&self) -> &str {
-        self.get_service_group()
-    }
-
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(self.0.write_to_bytes()?)
+        &self.service_group
     }
 }
 

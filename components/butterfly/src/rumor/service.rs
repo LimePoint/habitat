@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Chef Software Inc. and/or applicable contributors
+// Copyright (c) 2017 Chef Software Inc. and/or applicable contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,64 +18,45 @@
 
 use std::cmp::Ordering;
 use std::mem;
-use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 
+use bytes::BytesMut;
 use habitat_core::package::Identifiable;
 use habitat_core::service::ServiceGroup;
-use protobuf::{self, Message};
+use prost::Message;
 use toml;
 
-use error::Result;
-pub use message::swim::SysInfo;
-use message::swim::{Rumor as ProtoRumor, Rumor_Type as ProtoRumor_Type, Service as ProtoService};
-use rumor::Rumor;
+use error::{Error, Result};
+pub use protocol::swim::SysInfo;
+use protocol::{self,
+               swim::{Rumor as ProtoRumor, Service as ProtoService}};
+use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Service(ProtoRumor);
+pub struct Service {
+    pub member_id: String,
+    pub service_group: ServiceGroup,
+    pub incarnation: u64,
+    pub initialized: bool,
+    pub pkg: String,
+    pub cfg: Vec<u8>,
+    pub sys: SysInfo,
+}
 
 impl PartialOrd for Service {
     fn partial_cmp(&self, other: &Service) -> Option<Ordering> {
-        if self.get_member_id() != other.get_member_id()
-            || self.get_service_group() != other.get_service_group()
-        {
+        if self.member_id != other.member_id || self.service_group != other.service_group {
             None
         } else {
-            Some(self.get_incarnation().cmp(&other.get_incarnation()))
+            Some(self.incarnation.cmp(&other.incarnation))
         }
     }
 }
 
 impl PartialEq for Service {
     fn eq(&self, other: &Service) -> bool {
-        self.get_member_id() == other.get_member_id()
-            && self.get_service_group() == other.get_service_group()
-            && self.get_incarnation() == other.get_incarnation()
-    }
-}
-
-impl From<ProtoRumor> for Service {
-    fn from(pr: ProtoRumor) -> Service {
-        Service(pr)
-    }
-}
-
-impl From<Service> for ProtoRumor {
-    fn from(service: Service) -> ProtoRumor {
-        service.0
-    }
-}
-
-impl Deref for Service {
-    type Target = ProtoService;
-
-    fn deref(&self) -> &ProtoService {
-        self.0.get_service()
-    }
-}
-
-impl DerefMut for Service {
-    fn deref_mut(&mut self) -> &mut ProtoService {
-        self.0.mut_service()
+        self.member_id == other.member_id && self.service_group == other.service_group
+            && self.incarnation == other.incarnation
     }
 }
 
@@ -84,8 +65,8 @@ impl Service {
     pub fn new<T, U>(
         member_id: U,
         package: &T,
-        service_group: &ServiceGroup,
-        sys: &SysInfo,
+        service_group: ServiceGroup,
+        sys: SysInfo,
         cfg: Option<&toml::value::Table>,
     ) -> Self
     where
@@ -102,33 +83,65 @@ impl Service {
             "Service constructor requires the given package name to match the service \
              group's name"
         );
-        let mut rumor = ProtoRumor::new();
-        rumor.set_from_id(member_id.into());
-        rumor.set_field_type(ProtoRumor_Type::Service);
-
-        let mut proto = ProtoService::new();
-        proto.set_member_id(rumor.get_from_id().to_string());
-        proto.set_service_group(service_group.to_string());
-        proto.set_incarnation(0);
-        proto.set_pkg(package.to_string());
-        proto.set_sys(sys.deref().clone());
-        if let Some(cfg) = cfg {
+        Service {
+            member_id: member_id.into(),
+            service_group: service_group,
+            incarnation: 0,
+            initialized: false,
+            pkg: package.to_string(),
+            sys: sys,
             // TODO FN: Can we really expect this all the time, should we return a `Result<Self>`
             // in this constructor?
-            proto.set_cfg(toml::ser::to_vec(cfg).expect("Struct should serialize to bytes"));
+            cfg: cfg.map(|v| toml::ser::to_vec(v).expect("Struct should serialize to bytes"))
+                .unwrap_or_default(),
         }
+    }
+}
 
-        rumor.set_service(proto);
-        Service(rumor)
+impl protocol::Message for Service {
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let rumor = ProtoRumor::decode(bytes)?;
+        let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
+            RumorPayload::Service(payload) => payload,
+            _ => panic!("from-bytes service"),
+        };
+        Ok(Service {
+            member_id: rumor.member_id.ok_or(Error::ProtocolMismatch("member-id"))?,
+            service_group: rumor
+                .service_group
+                .ok_or(Error::ProtocolMismatch("service-group"))?
+                .and_then(ServiceGroup::from_str)?,
+            incarnation: rumor.incarnation.unwrap_or(0),
+            initialized: rumor.initialized.unwrap_or(false),
+            pkg: rumor.pkg.ok_or(Error::ProtocolMismatch("pkg"))?,
+            cfg: rumor.cfg.unwrap_or_default(),
+            sys: rumor.sys.ok_or(Error::ProtocolMismatch("sys"))?,
+        })
+    }
+
+    fn write_to_bytes(&self) -> Result<Vec<u8>> {
+        let payload = ProtoService {
+            member_id: Some(self.member_id),
+            service_group: Some(self.service_group.to_string()),
+            incarnation: Some(self.incarnation),
+            initialized: Some(self.initialized),
+            pkg: Some(self.pkg),
+            cfg: Some(self.cfg),
+            sys: Some(self.sys),
+        };
+        let rumor = ProtoRumor {
+            type_: self.kind() as i32,
+            tag: Vec::default(),
+            from_id: self.member_id.clone(),
+            payload: Some(RumorPayload::Service(payload)),
+        };
+        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
+        rumor.encode(&mut buf)?;
+        Ok(buf.to_vec())
     }
 }
 
 impl Rumor for Service {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = protobuf::parse_from_bytes::<ProtoRumor>(bytes)?;
-        Ok(Service::from(rumor))
-    }
-
     /// Follows a simple pattern; if we have a newer incarnation than the one we already have, the
     /// new one wins. So far, these never change.
     fn merge(&mut self, mut other: Service) -> bool {
@@ -140,20 +153,16 @@ impl Rumor for Service {
         }
     }
 
-    fn kind(&self) -> ProtoRumor_Type {
-        ProtoRumor_Type::Service
+    fn kind(&self) -> RumorType {
+        RumorType::Service
     }
 
     fn id(&self) -> &str {
-        self.get_member_id()
+        &self.member_id
     }
 
     fn key(&self) -> &str {
-        self.get_service_group()
-    }
-
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(self.0.write_to_bytes()?)
+        self.service_group.as_ref()
     }
 }
 

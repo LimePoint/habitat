@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Chef Software Inc. and/or applicable contributors
+// Copyright (c) 2017 Chef Software Inc. and/or applicable contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,12 +28,6 @@ pub mod service;
 pub mod service_config;
 pub mod service_file;
 
-pub use self::departure::Departure;
-pub use self::election::{Election, ElectionUpdate};
-pub use self::service::Service;
-pub use self::service_config::ServiceConfig;
-pub use self::service_file::ServiceFile;
-
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::default::Default;
@@ -45,19 +39,25 @@ use std::sync::{Arc, RwLock};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+pub use self::departure::Departure;
+pub use self::election::{Election, ElectionUpdate};
+pub use self::service::Service;
+pub use self::service_config::ServiceConfig;
+pub use self::service_file::ServiceFile;
 use error::{Error, Result};
-use message::swim::Rumor_Type;
+pub use protocol::swim::rumor::{Payload as RumorPayload, Type as RumorType};
+use protocol::Message;
 
 /// The description of a `RumorKey`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct RumorKey {
-    pub kind: Rumor_Type,
+    pub kind: RumorType,
     pub id: String,
     pub key: String,
 }
 
 impl RumorKey {
-    pub fn new<A, B>(kind: Rumor_Type, id: A, key: B) -> RumorKey
+    pub fn new<A, B>(kind: RumorType, id: A, key: B) -> RumorKey
     where
         A: ToString,
         B: ToString,
@@ -80,13 +80,11 @@ impl RumorKey {
 
 /// A representation of a Rumor; implemented by all the concrete types we share as rumors. The
 /// exception is the Membership rumor, since it's not actually a rumor in the same vein.
-pub trait Rumor: Serialize + Sized {
-    fn from_bytes(&[u8]) -> Result<Self>;
-    fn kind(&self) -> Rumor_Type;
+pub trait Rumor: Message + Sized {
+    fn kind(&self) -> RumorType;
     fn key(&self) -> &str;
     fn id(&self) -> &str;
     fn merge(&mut self, other: Self) -> bool;
-    fn write_to_bytes(&self) -> Result<Vec<u8>>;
 }
 
 impl<'a, T: Rumor> From<&'a T> for RumorKey {
@@ -105,7 +103,10 @@ pub struct RumorStore<T: Rumor> {
     update_counter: Arc<AtomicUsize>,
 }
 
-impl<T: Rumor> Default for RumorStore<T> {
+impl<T> Default for RumorStore<T>
+where
+    T: Rumor,
+{
     fn default() -> RumorStore<T> {
         RumorStore {
             list: Arc::new(RwLock::new(HashMap::new())),
@@ -114,7 +115,10 @@ impl<T: Rumor> Default for RumorStore<T> {
     }
 }
 
-impl<T: Rumor> Deref for RumorStore<T> {
+impl<T> Deref for RumorStore<T>
+where
+    T: Rumor,
+{
     type Target = RwLock<HashMap<String, HashMap<String, T>>>;
 
     fn deref(&self) -> &Self::Target {
@@ -122,7 +126,10 @@ impl<T: Rumor> Deref for RumorStore<T> {
     }
 }
 
-impl<T: Rumor> Serialize for RumorStore<T> {
+impl<T> Serialize for RumorStore<T>
+where
+    T: Rumor,
+{
     fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -134,7 +141,10 @@ impl<T: Rumor> Serialize for RumorStore<T> {
     }
 }
 
-impl<T: Rumor> RumorStore<T> {
+impl<T> RumorStore<T>
+where
+    T: Rumor,
+{
     /// Create a new RumorStore for the given type. Allows you to initialize the counter to a
     /// pre-set value. Useful mainly in testing.
     pub fn new(counter: usize) -> RumorStore<T> {
@@ -149,6 +159,17 @@ impl<T: Rumor> RumorStore<T> {
         let mut list = self.list.write().expect("Rumor store lock poisoned");
         list.clear();
         self.update_counter.swap(0, Ordering::Relaxed)
+    }
+
+    pub fn encode(&self, key: &str, member_id: &str) -> Result<Vec<u8>> {
+        let list = self.list.read().expect("Rumor store lock poisoned");
+        match list.get(key).and_then(|l| l.get(member_id)) {
+            Some(rumor) => rumor.write_to_bytes(),
+            None => Err(Error::NonExistentRumor(
+                String::from(member_id),
+                String::from(key),
+            )),
+        }
     }
 
     pub fn get_update_counter(&self) -> usize {
@@ -226,17 +247,6 @@ impl<T: Rumor> RumorStore<T> {
         with_closure(list.get(key).and_then(|r| r.get(member_id)));
     }
 
-    pub fn write_to_bytes(&self, key: &str, member_id: &str) -> Result<Vec<u8>> {
-        let list = self.list.read().expect("Rumor store lock poisoned");
-        match list.get(key).and_then(|l| l.get(member_id)) {
-            Some(rumor) => rumor.write_to_bytes(),
-            None => Err(Error::NonExistentRumor(
-                String::from(member_id),
-                String::from(key),
-            )),
-        }
-    }
-
     pub fn contains_rumor(&self, key: &str, id: &str) -> bool {
         let list = self.list.read().expect("Rumor store lock poisoned");
         match list.get(key).and_then(|l| l.get(id)) {
@@ -259,7 +269,7 @@ mod tests {
     use uuid::Uuid;
 
     use error::Result;
-    use message::swim::Rumor_Type;
+    use message::RumorType;
     use rumor::Rumor;
 
     #[derive(Clone, Debug, Serialize)]
@@ -288,8 +298,8 @@ mod tests {
             Ok(FakeRumor::default())
         }
 
-        fn kind(&self) -> Rumor_Type {
-            Rumor_Type::Fake
+        fn kind(&self) -> RumorType {
+            RumorType::Fake
         }
 
         fn key(&self) -> &str {
@@ -323,8 +333,8 @@ mod tests {
             Ok(TrumpRumor::default())
         }
 
-        fn kind(&self) -> Rumor_Type {
-            Rumor_Type::Fake2
+        fn kind(&self) -> RumorType {
+            RumorType::Fake2
         }
 
         fn key(&self) -> &str {

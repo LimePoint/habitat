@@ -136,7 +136,7 @@ impl Default for RumorHeat {
 mod tests {
     use super::*;
     use error::Result;
-    use message::swim::Rumor_Type;
+    use message::swim;
     use rumor::{Rumor, RumorKey};
     use uuid::Uuid;
 
@@ -163,8 +163,8 @@ mod tests {
             Ok(FakeRumor::default())
         }
 
-        fn kind(&self) -> Rumor_Type {
-            Rumor_Type::Fake
+        fn kind(&self) -> swim::rumor::Type {
+            swim::rumor::Type::Fake
         }
 
         fn key(&self) -> &str {

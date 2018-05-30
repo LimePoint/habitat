@@ -18,92 +18,39 @@ use std::collections::{hash_map, HashMap};
 use std::fmt;
 use std::iter::IntoIterator;
 use std::net::SocketAddr;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::result;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use protobuf::ProtobufEnum;
 use rand::{thread_rng, Rng};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use time::SteadyTime;
 use uuid::Uuid;
 
-use error::Error;
-use message::swim::{Member as ProtoMember, Membership as ProtoMembership,
-                    Membership_Health as ProtoMembership_Health, Rumor_Type};
-use rumor::RumorKey;
+use error::{Error, Result};
+pub use protocol::swim::membership::Health;
+use protocol::swim::{self, Rumor as ProtoRumor};
+use rumor::{RumorKey, RumorPayload};
 
 /// How many nodes do we target when we need to run PingReq.
 const PINGREQ_TARGETS: usize = 5;
 
-/// The health of a node.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum Health {
-    Alive,
-    Suspect,
-    Confirmed,
-    Departed,
-}
-
-impl Default for Health {
-    fn default() -> Health {
-        Health::Alive
-    }
-}
+// This is a Uuid type turned to a string
+pub type UuidSimple = String;
 
 impl FromStr for Health {
     type Err = Error;
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
+    fn from_str(value: &str) -> Result<Self> {
         match value.to_lowercase().as_ref() {
             "alive" => Ok(Health::Alive),
             "suspect" => Ok(Health::Suspect),
             "confirmed" => Ok(Health::Confirmed),
             "departed" => Ok(Health::Departed),
             value => panic!("No match for Health from string, {}", value),
-        }
-    }
-}
-
-impl From<i32> for Health {
-    fn from(value: i32) -> Health {
-        Self::from(ProtoMembership_Health::from_i32(value).unwrap_or(ProtoMembership_Health::ALIVE))
-    }
-}
-
-/// Maps our internal health to the wire protocols health.
-impl From<ProtoMembership_Health> for Health {
-    fn from(pm_health: ProtoMembership_Health) -> Health {
-        match pm_health {
-            ProtoMembership_Health::ALIVE => Health::Alive,
-            ProtoMembership_Health::SUSPECT => Health::Suspect,
-            ProtoMembership_Health::CONFIRMED => Health::Confirmed,
-            ProtoMembership_Health::DEPARTED => Health::Departed,
-        }
-    }
-}
-
-impl From<Health> for ProtoMembership_Health {
-    fn from(pm_health: Health) -> ProtoMembership_Health {
-        match pm_health {
-            Health::Alive => ProtoMembership_Health::ALIVE,
-            Health::Suspect => ProtoMembership_Health::SUSPECT,
-            Health::Confirmed => ProtoMembership_Health::CONFIRMED,
-            Health::Departed => ProtoMembership_Health::DEPARTED,
-        }
-    }
-}
-
-impl<'a> From<&'a Health> for ProtoMembership_Health {
-    fn from(pm_health: &'a Health) -> ProtoMembership_Health {
-        match pm_health {
-            &Health::Alive => ProtoMembership_Health::ALIVE,
-            &Health::Suspect => ProtoMembership_Health::SUSPECT,
-            &Health::Confirmed => ProtoMembership_Health::CONFIRMED,
-            &Health::Departed => ProtoMembership_Health::DEPARTED,
         }
     }
 }
@@ -124,7 +71,13 @@ impl fmt::Display for Health {
 /// representation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Member {
-    pub proto: ProtoMember,
+    pub id: String,
+    pub incarnation: u64,
+    pub address: String,
+    pub swim_port: i32,
+    pub gossip_port: i32,
+    pub persistent: bool,
+    pub departed: bool,
 }
 
 impl Member {
@@ -135,7 +88,7 @@ impl Member {
     /// This function panics if the address is un-parseable. In practice, it shouldn't be
     /// un-parseable, since its set from the inbound socket directly.
     pub fn swim_socket_address(&self) -> SocketAddr {
-        let address_str = format!("{}:{}", self.get_address(), self.get_swim_port());
+        let address_str = format!("{}:{}", self.address, self.swim_port);
         match address_str.parse() {
             Ok(addr) => addr,
             Err(e) => {
@@ -147,63 +100,35 @@ impl Member {
 
 impl Default for Member {
     fn default() -> Self {
-        let mut proto_member = ProtoMember::new();
-        proto_member.set_id(Uuid::new_v4().simple().to_string());
-        proto_member.set_incarnation(0);
         Member {
-            proto: proto_member,
-        }
-    }
-}
-
-impl Deref for Member {
-    type Target = ProtoMember;
-
-    fn deref(&self) -> &ProtoMember {
-        &self.proto
-    }
-}
-
-impl DerefMut for Member {
-    fn deref_mut(&mut self) -> &mut ProtoMember {
-        &mut self.proto
-    }
-}
-
-impl From<ProtoMember> for Member {
-    fn from(member: ProtoMember) -> Member {
-        Member { proto: member }
-    }
-}
-
-impl<'a> From<&'a ProtoMember> for Member {
-    fn from(member: &'a ProtoMember) -> Member {
-        Member {
-            proto: member.clone(),
+            id: Uuid::new_v4().simple().to_string(),
+            incarnation: 0,
+            address: String::default(),
+            swim_port: 0,
+            gossip_port: 0,
+            persistent: false,
+            departed: false,
         }
     }
 }
 
 impl From<Member> for RumorKey {
     fn from(member: Member) -> RumorKey {
-        RumorKey::new(Rumor_Type::Member, member.get_id(), "")
+        RumorKey::new(swim::rumor::Type::Member, member.id, "")
     }
 }
 
 impl<'a> From<&'a Member> for RumorKey {
     fn from(member: &'a Member) -> RumorKey {
-        RumorKey::new(Rumor_Type::Member, member.get_id(), "")
+        RumorKey::new(swim::rumor::Type::Member, member.id, "")
     }
 }
 
 impl<'a> From<&'a &'a Member> for RumorKey {
     fn from(member: &'a &'a Member) -> RumorKey {
-        RumorKey::new(Rumor_Type::Member, member.get_id(), "")
+        RumorKey::new(swim::rumor::Type::Member, member.id, "")
     }
 }
-
-// This is a Uuid type turned to a string
-pub type UuidSimple = String;
 
 /// Tracks lists of members, their health, and how long they have been suspect.
 #[derive(Debug, Clone)]
@@ -308,15 +233,15 @@ impl MemberList {
         if let Some(current_member) = self.members
             .read()
             .expect("Member List read lock poisoned")
-            .get(member.get_id())
+            .get(&member.id)
         {
             // If my incarnation is newer than the member we are being asked
             // to insert, we want to prefer our member, health and all.
-            if current_member.get_incarnation() > member.get_incarnation() {
+            if current_member.incarnation > member.incarnation {
                 share_rumor = false;
             // If the new rumor has a higher incarnation than our status, we want
             // to prefer it.
-            } else if member.get_incarnation() > current_member.get_incarnation() {
+            } else if member.incarnation > current_member.incarnation {
                 share_rumor = true;
                 if health == Health::Confirmed {
                     stop_suspicion = true;
@@ -328,9 +253,8 @@ impl MemberList {
             } else {
                 // We know we have a health if we have a record
                 let hl = self.health.read().expect("Health lock is poisoned");
-                let current_health = hl.get(current_member.get_id()).expect(
-                    "No health for a membership record should be impossible; did you use \
-                     insert?",
+                let current_health = hl.get(&current_member.id).expect(
+                    "No health for a membership record should be impossible; did you use insert?",
                 );
                 // If currently healthy and the rumor is suspicion, then we are now suspicious.
                 if *current_health == Health::Alive && health == Health::Suspect {
@@ -380,29 +304,29 @@ impl MemberList {
             self.health
                 .write()
                 .expect("Health lock is poisoned")
-                .insert(String::from(member.get_id()), health);
+                .insert(member.id.clone(), health);
             if start_suspicion == true {
                 self.suspect
                     .write()
                     .expect("Suspect lock is poisoned")
-                    .insert(String::from(member.get_id()), SteadyTime::now());
+                    .insert(member.id.clone(), SteadyTime::now());
             }
             if stop_suspicion == true {
                 self.suspect
                     .write()
                     .expect("Suspect lock is poisoned")
-                    .remove(member.get_id());
+                    .remove(&member.id);
             }
             if stop_departure == true {
                 self.depart
                     .write()
                     .expect("Departure lock is poisoned")
-                    .remove(member.get_id());
+                    .remove(&member.id);
             }
             self.members
                 .write()
                 .expect("Member list lock is poisoned")
-                .insert(String::from(member.get_id()), member);
+                .insert(member.id, member);
         }
         share_rumor
     }
@@ -412,7 +336,7 @@ impl MemberList {
         match self.health
             .read()
             .expect("Health lock is poisoned")
-            .get(member.get_id())
+            .get(&member.id)
         {
             Some(health) => Some(*health),
             None => None,
@@ -448,7 +372,7 @@ impl MemberList {
         match self.health
             .read()
             .expect("Health lock is poisoned")
-            .get(member.get_id())
+            .get(&member.id)
         {
             Some(real_health) if *real_health == health => true,
             Some(_) => false,
@@ -472,7 +396,7 @@ impl MemberList {
     /// Returns true if the member is alive, suspect, or persistent; used during the target
     /// selection phase of the outbound thread.
     pub fn pingable(&self, member: &Member) -> bool {
-        if member.get_persistent() {
+        if member.persistent {
             return true;
         }
         self.check_health_of(member, Health::Alive) || self.check_health_of(member, Health::Suspect)
@@ -481,7 +405,7 @@ impl MemberList {
     /// Returns true if we are pinging this member because they are persistent, but we think they
     /// are gone.
     pub fn persistent_and_confirmed(&self, member: &Member) -> bool {
-        member.get_persistent() && self.check_health_of(member, Health::Confirmed)
+        member.persistent && self.check_health_of(member, Health::Confirmed)
     }
 
     /// Updates the health of a member without touching the member itself. Returns true if the
@@ -510,27 +434,25 @@ impl MemberList {
 
     /// The same as `insert_health_by_id`, but takes a member rather than an id.
     pub fn insert_health(&self, member: &Member, health: Health) -> bool {
-        self.insert_health_by_id(member.get_id(), health)
+        self.insert_health_by_id(&member.id, health)
     }
 
     /// Returns a protobuf membership record for the given member id.
-    pub fn membership_for(&self, member_id: &str) -> Option<ProtoMembership> {
-        let mut pm = ProtoMembership::new();
-        let mhealth: ProtoMembership_Health = match self.health
+    pub fn membership_for(&self, member_id: &str) -> Option<Membership> {
+        let mhealth = match self.health
             .read()
             .expect("Health lock is poisoned")
             .get(member_id)
         {
-            Some(health) => health.into(),
+            Some(health) => *health,
             None => return None,
         };
         let ml = self.members.read().expect("Member list lock is poisoned");
         match ml.get(member_id) {
-            Some(member) => {
-                pm.set_health(mhealth);
-                pm.set_member(member.proto.clone());
-                Some(pm)
-            }
+            Some(member) => Some(Membership {
+                health: mhealth,
+                member: member.clone(),
+            }),
             None => None,
         }
     }
@@ -549,7 +471,7 @@ impl MemberList {
             .read()
             .expect("Member list lock is poisoned")
             .values()
-            .filter(|v| v.get_id() != exclude_id)
+            .filter(|v| v.id != exclude_id)
             .map(|v| v.clone())
             .collect();
         let mut rng = thread_rng();
@@ -577,8 +499,8 @@ impl MemberList {
         for member in members
             .into_iter()
             .filter(|m| {
-                m.get_id() != sending_member_id && m.get_id() != target_member_id
-                    && self.check_health_of_by_id(m.get_id(), Health::Alive)
+                m.id != sending_member_id && m.id != target_member_id
+                    && self.check_health_of_by_id(&m.id, Health::Alive)
             })
             .take(PINGREQ_TARGETS)
         {
@@ -695,6 +617,39 @@ impl MemberList {
     }
 }
 
+#[derive(Debug)]
+pub struct Membership {
+    pub member: Member,
+    pub health: Health,
+}
+
+impl Membership {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let rumor = ProtoRumor::decode(bytes)?;
+        let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
+            RumorPayload::Member(payload) => payload,
+            _ => panic!("from-bytes member"),
+        };
+        let member = rumor.member.ok_or(Error::ProtocolMismatch("member"))?;
+        Ok(Membership {
+            member: Member {
+                id: member.id.ok_or(Error::ProtocolMismatch("id"))?,
+                incarnation: member.incarnation.unwrap_or(0),
+                address: member.address.ok_or(Error::ProtocolMismatch("address"))?,
+                swim_port: member
+                    .swim_port
+                    .ok_or(Error::ProtocolMismatch("swim-port"))?,
+                gossip_port: member
+                    .gossip_port
+                    .ok_or(Error::ProtocolMismatch("gossip-port"))?,
+                persistent: member.persistent.unwrap_or(false),
+                departed: member.departed.unwrap_or(false),
+            },
+            health: rumor.health.map(Health::from_i32).unwrap_or(Health::Alive),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     mod member {
@@ -706,8 +661,8 @@ mod tests {
         #[test]
         fn new() {
             let member = Member::default();
-            assert_eq!(member.proto.get_id().len(), 32);
-            assert_eq!(member.proto.get_incarnation(), 0);
+            assert_eq!(member.id.len(), 32);
+            assert_eq!(member.incarnation, 0);
         }
 
         // Takes a member in from a protobuf
@@ -768,7 +723,7 @@ mod tests {
                 let from = i.nth(0).unwrap();
                 let target = i.nth(1).unwrap();
                 let mut counter: usize = 0;
-                ml.with_pingreq_targets(from.get_id(), target.get_id(), |_m| counter += 1);
+                ml.with_pingreq_targets(&from.id, &target.id, |_m| counter += 1);
                 assert_eq!(counter, PINGREQ_TARGETS);
             });
         }
@@ -780,8 +735,8 @@ mod tests {
                 let from = i.nth(0).unwrap();
                 let target = i.nth(1).unwrap();
                 let mut excluded_appears: bool = false;
-                ml.with_pingreq_targets(from.get_id(), target.get_id(), |m| {
-                    if m.get_id() == from.get_id() {
+                ml.with_pingreq_targets(&from.id, &target.id, |m| {
+                    if m.id == from.id {
                         excluded_appears = true
                     }
                 });
@@ -796,8 +751,8 @@ mod tests {
                 let from = i.nth(0).unwrap();
                 let target = i.nth(1).unwrap();
                 let mut excluded_appears: bool = false;
-                ml.with_pingreq_targets(from.get_id(), target.get_id(), |m| {
-                    if m.get_id() == target.get_id() {
+                ml.with_pingreq_targets(&from.id, &target.id, |m| {
+                    if m.id == target.id {
                         excluded_appears = true
                     }
                 });
@@ -812,7 +767,7 @@ mod tests {
                 let from = i.nth(0).unwrap();
                 let target = i.nth(1).unwrap();
                 let mut counter: isize = 0;
-                ml.with_pingreq_targets(from.get_id(), target.get_id(), |_m| counter += 1);
+                ml.with_pingreq_targets(&from.id, &target.id, |_m| counter += 1);
                 assert_eq!(counter, 1);
             });
         }
@@ -839,9 +794,7 @@ mod tests {
             assert!(ml.check_health_of(&mcheck_one, Health::Alive));
 
             assert_eq!(ml.insert(member_two, Health::Alive), true);
-            ml.with_member(mcheck_two.get_id(), |m| {
-                assert_eq!(m.unwrap().get_incarnation(), 1)
-            });
+            ml.with_member(&mcheck_two.id, |m| assert_eq!(m.unwrap().incarnation, 1));
         }
 
         #[test]
@@ -858,9 +811,7 @@ mod tests {
             assert!(ml.check_health_of(&mcheck_one, Health::Alive));
 
             assert_eq!(ml.insert(member_two, Health::Alive), false);
-            ml.with_member(mcheck_two.get_id(), |m| {
-                assert_eq!(m.unwrap().get_incarnation(), 1)
-            });
+            ml.with_member(&mcheck_two.id, |m| assert_eq!(m.unwrap().incarnation, 1));
         }
 
         #[test]

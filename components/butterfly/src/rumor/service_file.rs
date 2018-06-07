@@ -18,15 +18,13 @@
 
 use std::cmp::Ordering;
 use std::mem;
+use std::str::FromStr;
 
-use bytes::BytesMut;
 use habitat_core::crypto::{default_cache_key_path, BoxKeyPair};
 use habitat_core::service::ServiceGroup;
-use prost::Message;
 
 use error::{Error, Result};
-use protocol::{self,
-               swim::{Rumor as ProtoRumor, ServiceFile as ProtoServiceFile}};
+use protocol::{self, newscast::Rumor as ProtoRumor, FromProto};
 use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,43 +96,25 @@ impl ServiceFile {
     }
 }
 
-impl protocol::Message for ServiceFile {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = ProtoRumor::decode(bytes)?;
+impl protocol::Message<ProtoRumor> for ServiceFile {}
+
+impl FromProto<ProtoRumor> for ServiceFile {
+    fn from_proto(rumor: ProtoRumor) -> Result<Self> {
         let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
             RumorPayload::ServiceFile(payload) => payload,
             _ => panic!("from-bytes service-config"),
         };
         Ok(ServiceFile {
             from_id: rumor.from_id.ok_or(Error::ProtocolMismatch("from-id"))?,
-            service_group: rumor
+            service_group: payload
                 .service_group
-                .ok_or(Error::ProtocolMismatch("service-group"))?
-                .and_then(ServiceGroup::from_str)?,
-            incarnation: rumor.incarnation.unwrap_or(0),
-            encrypted: rumor.initialized.unwrap_or(false),
-            filename: rumor.filename.ok_or(Error::ProtocolMismatch("filename"))?,
-            body: rumor.body.unwrap_or_default(),
+                .ok_or(Error::ProtocolMismatch("service-group"))
+                .and_then(|s| ServiceGroup::from_str(&s).map_err(Error::from))?,
+            incarnation: payload.incarnation.unwrap_or(0),
+            encrypted: payload.encrypted.unwrap_or(false),
+            filename: payload.filename.ok_or(Error::ProtocolMismatch("filename"))?,
+            body: payload.body.unwrap_or_default(),
         })
-    }
-
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        let payload = ProtoServiceFile {
-            service_group: Some(self.service_group.to_string()),
-            incarnation: Some(self.incarnation),
-            encrypted: Some(self.encrypted),
-            filename: Some(self.filename),
-            body: Some(self.body),
-        };
-        let rumor = ProtoRumor {
-            type_: self.kind() as i32,
-            tag: Vec::default(),
-            from_id: self.member_id.clone(),
-            payload: Some(RumorPayload::ServiceFile(payload)),
-        };
-        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
-        rumor.encode(&mut buf)?;
-        Ok(buf.to_vec())
     }
 }
 

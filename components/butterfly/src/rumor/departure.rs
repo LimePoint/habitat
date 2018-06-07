@@ -20,12 +20,8 @@
 
 use std::cmp::Ordering;
 
-use bytes::BytesMut;
-use prost::Message;
-
 use error::{Error, Result};
-use protocol::{self,
-               swim::{Departure as ProtoDeparture, Rumor as ProtoRumor}};
+use protocol::{self, newscast::Rumor as ProtoRumor, FromProto};
 use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,31 +40,19 @@ impl Departure {
     }
 }
 
-impl protocol::Message for Departure {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = ProtoRumor::decode(bytes)?;
+impl protocol::Message<ProtoRumor> for Departure {}
+
+impl FromProto<ProtoRumor> for Departure {
+    fn from_proto(rumor: ProtoRumor) -> Result<Self> {
         let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
             RumorPayload::Departure(payload) => payload,
             _ => panic!("from-bytes departure"),
         };
         Ok(Departure {
-            member_id: rumor.member_id.ok_or(Error::ProtocolMismatch("member-id"))?,
+            member_id: payload
+                .member_id
+                .ok_or(Error::ProtocolMismatch("member-id"))?,
         })
-    }
-
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        let payload = ProtoDeparture {
-            member_id: Some(self.member_id),
-        };
-        let rumor = ProtoRumor {
-            type_: self.kind() as i32,
-            tag: Vec::default(),
-            from_id: "butterflyclient".to_string(),
-            payload: Some(RumorPayload::Departure(payload)),
-        };
-        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
-        rumor.encode(&mut buf)?;
-        Ok(buf.to_vec())
     }
 }
 

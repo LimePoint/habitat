@@ -49,6 +49,7 @@ use serde::{Serialize, Serializer};
 use error::{Error, Result};
 use member::{Health, Member, MemberList};
 use message;
+use protocol::swim::Ack;
 use rumor::dat_file::DatFile;
 use rumor::departure::Departure;
 use rumor::election::{Election, ElectionUpdate};
@@ -57,7 +58,6 @@ use rumor::service::Service;
 use rumor::service_config::ServiceConfig;
 use rumor::service_file::ServiceFile;
 use rumor::{Rumor, RumorKey, RumorStore, RumorType};
-use swim::Ack;
 use trace::{Trace, TraceKind};
 
 type AckReceiver = mpsc::Receiver<(SocketAddr, Ack)>;

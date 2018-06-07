@@ -71,7 +71,6 @@ pub mod message;
 pub mod protocol;
 pub mod rumor;
 pub mod server;
-pub mod swim;
 
 use std::cell::UnsafeCell;
 

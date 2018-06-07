@@ -22,6 +22,7 @@ use zmq;
 
 use error::{Error, Result};
 use message;
+use protocol::Message;
 use rumor::departure::Departure;
 use rumor::service_config::ServiceConfig;
 use rumor::service_file::ServiceFile;

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Chef Software Inc. and/or applicable contributors
+// Copyright (c) 2017 Chef Software Inc. and/or applicable contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,9 +24,16 @@ use prost::Message;
 use zmq;
 
 use error::Error;
+use member::Membership;
 use message::swim::{Rumor, Rumor_Type};
 use protocol::swim::Rumor as ProtoRumor;
-use rumor::{election::ElectionUpdate, RumorPayload, RumorType};
+use protocol::{newscast::{Rumor, RumorPayload, RumorType},
+               FromProto};
+use rumor::{departure::Departure,
+            election::{Election, ElectionUpdate},
+            service::Service,
+            service_config::ServiceConfig,
+            service_file::ServiceFile};
 use server::Server;
 use trace::TraceKind;
 use ZMQ_CONTEXT;
@@ -79,13 +86,14 @@ impl Pull {
                     continue;
                 }
             };
-            let mut proto = match ProtoRumor::decode(&payload).map_err(Error::from) {
+            let mut proto = match Rumor::decode(&payload).map_err(Error::from) {
                 Ok(proto) => proto,
                 Err(e) => {
                     error!("Error parsing protocol message: {:?}", e);
                     continue 'recv;
                 }
             };
+            // JW EOD: Convert the proto message into an approrpiate strongly typed message
             if self.server.check_blacklist(&proto.from_id) {
                 warn!(
                     "Not processing message from {} - it is blacklisted",
@@ -93,37 +101,62 @@ impl Pull {
                 );
                 continue 'recv;
             }
-            trace_it!(GOSSIP: &self.server, TraceKind::RecvRumor, &proto.from_id, &proto);
-            match proto.payload {
-                RumorPayload::Membership(membership) => {
-                    self.server
-                        .insert_member_from_rumor(membership.member, membership.health);
-                }
-                RumorPayload::Service(service) => {
-                    self.server.insert_service(service);
-                }
-                RumorPayload::ServiceConfig(service_config) => {
-                    self.server.insert_service_config(service_config);
-                }
-                RumorPayload::ServiceFile(service_file) => {
-                    self.server.insert_service_file(service_file);
-                }
-                RumorPayload::Election(election) => match proto.type_ {
-                    RumorType::Election => self.server.insert_election(election),
-                    RumorType::ElectionUpdate => {
-                        // Ideally the election update rumor is it's own thing and not a tagged
-                        // derivation of election. It originally made sense to sort of "inherit"
-                        // from `Election`, but once we upgraded to the Prost implementation of
-                        // Protobuf we got the ability to pack a Rumor's payload as a Rust
-                        // enumeration.  This essentially makes the `type` field moot, so now this
-                        // looks a bit out of place.
-                        self.server
-                            .insert_update_election(ElectionUpdate::from(election));
+            // trace_it!(GOSSIP: &self.server, TraceKind::RecvRumor, &proto.from_id, &proto);
+            match RumorType::from_i32(proto.type_) {
+                Some(RumorType::Member) => match Membership::from_proto(proto) {
+                    Ok(membership) => self.server
+                        .insert_member_from_rumor(membership.member, membership.health),
+                    Err(e) => {
+                        error!("Error parsing member message: {:?}", e);
+                        continue 'recv;
                     }
-                    _ => panic!("unknown election proto type"),
                 },
-                RumorPayload::Departure(departure) => {
-                    self.server.insert_departure(departure);
+                Some(RumorType::Service) => match Service::from_proto(proto) {
+                    Ok(service) => self.server.insert_service(service),
+                    Err(e) => {
+                        error!("Error parsing service message: {:?}", e);
+                        continue 'recv;
+                    }
+                },
+                Some(RumorType::ServiceConfig) => match ServiceConfig::from_proto(proto) {
+                    Ok(service_config) => self.server.insert_service_config(service_config),
+                    Err(e) => {
+                        error!("Error parsing service-config message: {:?}", e);
+                        continue 'recv;
+                    }
+                },
+                Some(RumorType::ServiceFile) => match ServiceFile::from_proto(proto) {
+                    Ok(service_file) => self.server.insert_service_file(service_file),
+                    Err(e) => {
+                        error!("Error parsing service-file message: {:?}", e);
+                        continue 'recv;
+                    }
+                },
+                Some(RumorType::Election) => match Election::from_proto(proto) {
+                    Ok(election) => self.server.insert_election(election),
+                    Err(e) => {
+                        error!("Error parsing election message: {:?}", e);
+                        continue 'recv;
+                    }
+                },
+                Some(RumorType::ElectionUpdate) => match ElectionUpdate::from_proto(proto) {
+                    Ok(election) => self.server
+                        .insert_update_election(ElectionUpdate::from(election)),
+                    Err(e) => {
+                        error!("Error parsing election-update message: {:?}", e);
+                        continue 'recv;
+                    }
+                },
+                Some(RumorType::Departure) => match Departure::from_proto(proto) {
+                    Ok(departure) => self.server.insert_departure(departure),
+                    Err(e) => {
+                        error!("Error parsing departure message: {:?}", e);
+                        continue 'recv;
+                    }
+                },
+                None => {
+                    error!("Unknown rumor type: {:?}", proto.type_);
+                    continue 'recv;
                 }
             }
         }

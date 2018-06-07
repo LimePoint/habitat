@@ -24,6 +24,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use bytes::BytesMut;
+use prost::Message;
 use rand::{thread_rng, Rng};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
@@ -31,9 +33,11 @@ use time::SteadyTime;
 use uuid::Uuid;
 
 use error::{Error, Result};
-pub use protocol::swim::membership::Health;
-use protocol::swim::{self, Rumor as ProtoRumor};
-use rumor::{RumorKey, RumorPayload};
+use protocol::newscast::Rumor as ProtoRumor;
+pub use protocol::swim::Health;
+use protocol::swim::{Member as ProtoMember, Membership as ProtoMembership};
+use protocol::FromProto;
+use rumor::{RumorKey, RumorPayload, RumorType};
 
 /// How many nodes do we target when we need to run PingReq.
 const PINGREQ_TARGETS: usize = 5;
@@ -114,19 +118,35 @@ impl Default for Member {
 
 impl From<Member> for RumorKey {
     fn from(member: Member) -> RumorKey {
-        RumorKey::new(swim::rumor::Type::Member, member.id, "")
+        RumorKey::new(RumorType::Member, member.id, "")
     }
 }
 
 impl<'a> From<&'a Member> for RumorKey {
     fn from(member: &'a Member) -> RumorKey {
-        RumorKey::new(swim::rumor::Type::Member, member.id, "")
+        RumorKey::new(RumorType::Member, member.id, "")
     }
 }
 
 impl<'a> From<&'a &'a Member> for RumorKey {
     fn from(member: &'a &'a Member) -> RumorKey {
-        RumorKey::new(swim::rumor::Type::Member, member.id, "")
+        RumorKey::new(RumorType::Member, member.id, "")
+    }
+}
+
+impl FromProto<ProtoMember> for Member {
+    fn from_proto(proto: ProtoMember) -> Result<Self> {
+        Ok(Member {
+            id: proto.id.ok_or(Error::ProtocolMismatch("id"))?,
+            incarnation: proto.incarnation.unwrap_or(0),
+            address: proto.address.ok_or(Error::ProtocolMismatch("address"))?,
+            swim_port: proto.swim_port.ok_or(Error::ProtocolMismatch("swim-port"))?,
+            gossip_port: proto
+                .gossip_port
+                .ok_or(Error::ProtocolMismatch("gossip-port"))?,
+            persistent: proto.persistent.unwrap_or(false),
+            departed: proto.departed.unwrap_or(false),
+        })
     }
 }
 
@@ -630,7 +650,7 @@ impl Membership {
             RumorPayload::Member(payload) => payload,
             _ => panic!("from-bytes member"),
         };
-        let member = rumor.member.ok_or(Error::ProtocolMismatch("member"))?;
+        let member = payload.member.ok_or(Error::ProtocolMismatch("member"))?;
         Ok(Membership {
             member: Member {
                 id: member.id.ok_or(Error::ProtocolMismatch("id"))?,
@@ -645,7 +665,31 @@ impl Membership {
                 persistent: member.persistent.unwrap_or(false),
                 departed: member.departed.unwrap_or(false),
             },
-            health: rumor.health.map(Health::from_i32).unwrap_or(Health::Alive),
+            health: payload
+                .health
+                .and_then(Health::from_i32)
+                .unwrap_or(Health::Alive),
+        })
+    }
+
+    pub fn write_to_bytes(self) -> Result<Vec<u8>> {
+        let rumor: ProtoMembership = self.into();
+        let mut bytes = BytesMut::with_capacity(rumor.encoded_len());
+        Ok(bytes.to_vec())
+    }
+}
+
+impl FromProto<ProtoMembership> for Membership {
+    fn from_proto(proto: ProtoMembership) -> Result<Self> {
+        Ok(Membership {
+            member: proto
+                .member
+                .ok_or(Error::ProtocolMismatch("member"))
+                .and_then(Member::from_proto)?,
+            health: proto
+                .health
+                .and_then(Health::from_i32)
+                .unwrap_or(Health::Alive),
         })
     }
 }

@@ -23,14 +23,15 @@
 //! the election finishing. There can, in the end, be only one.
 
 use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 
-use bytes::BytesMut;
 use habitat_core::service::ServiceGroup;
 use prost::Message;
 
 use error::{Error, Result};
-pub use protocol::swim::{election::Status as ElectionStatus, Election as ProtoElection};
-use protocol::{self, swim::Rumor as ProtoRumor};
+use protocol::newscast::Rumor as ProtoRumor;
+pub use protocol::newscast::{election::Status as ElectionStatus, Election as ProtoElection};
+use protocol::{self, FromProto};
 use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,7 +54,8 @@ impl Election {
     {
         let from_id = member_id.into();
         Election {
-            member_id: from_id.clone(),
+            from_id: from_id.clone(),
+            member_id: from_id,
             service_group: service_group,
             term: 0,
             suitability: suitability,
@@ -106,9 +108,10 @@ impl PartialEq for Election {
     }
 }
 
-impl protocol::Message for Election {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = ProtoRumor::decode(bytes)?;
+impl protocol::Message<ProtoRumor> for Election {}
+
+impl FromProto<ProtoRumor> for Election {
+    fn from_proto(rumor: ProtoRumor) -> Result<Self> {
         let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
             RumorPayload::Election(payload) => payload,
             _ => panic!("from-bytes election"),
@@ -117,38 +120,18 @@ impl protocol::Message for Election {
         Ok(Election {
             from_id: from_id.clone(),
             member_id: from_id.clone(),
-            service_group: rumor
+            service_group: payload
                 .service_group
-                .ok_or(Error::ProtocolMismatch("service-group"))?
-                .and_then(ServiceGroup::from_str)?,
-            term: rumor.term.unwrap_or(0),
-            suitability: rumor.suitability.unwrap_or(0),
-            status: rumor
+                .ok_or(Error::ProtocolMismatch("service-group"))
+                .and_then(|s| ServiceGroup::from_str(&s).map_err(Error::from))?,
+            term: payload.term.unwrap_or(0),
+            suitability: payload.suitability.unwrap_or(0),
+            status: payload
                 .status
-                .map(ElectionStatus::from_i32)
+                .and_then(ElectionStatus::from_i32)
                 .unwrap_or(ElectionStatus::Running),
-            config: rumor.votes.ok_or(Error::ProtocolMismatch("votes"))?,
+            votes: payload.votes,
         })
-    }
-
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        let payload = ProtoElection {
-            member_id: Some(self.member_id.clone()),
-            service_group: Some(self.service_group.to_string()),
-            term: Some(self.term),
-            suitability: Some(self.suitability),
-            status: Some(self.status as i32),
-            votes: self.votes.clone(),
-        };
-        let rumor = ProtoRumor {
-            type_: self.kind() as i32,
-            tag: Vec::default(),
-            from_id: self.member_id.clone(),
-            payload: RumorPayload::Election(payload),
-        };
-        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
-        rumor.encode(&mut buf)?;
-        Ok(buf.to_vec())
     }
 }
 
@@ -246,29 +229,11 @@ impl From<Election> for ElectionUpdate {
     }
 }
 
-impl protocol::Message for ElectionUpdate {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Ok(ElectionUpdate(Election::from_bytes(bytes)?))
-    }
+impl protocol::Message<ProtoRumor> for ElectionUpdate {}
 
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        let payload = ProtoElection {
-            member_id: Some(self.member_id.clone()),
-            service_group: Some(self.service_group.to_string()),
-            term: Some(self.term),
-            suitability: Some(self.suitability),
-            status: Some(self.status as i32),
-            votes: self.votes.clone(),
-        };
-        let rumor = ProtoRumor {
-            type_: self.kind() as i32,
-            tag: Vec::default(),
-            from_id: self.member_id.clone(),
-            payload: RumorPayload::Election(payload),
-        };
-        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
-        rumor.encode(&mut buf)?;
-        Ok(buf.to_vec())
+impl FromProto<ProtoRumor> for ElectionUpdate {
+    fn from_proto(rumor: ProtoRumor) -> Result<Self> {
+        Ok(ElectionUpdate(Election::from_proto(rumor)?))
     }
 }
 

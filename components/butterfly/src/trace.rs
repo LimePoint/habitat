@@ -348,7 +348,7 @@ macro_rules! trace_it {
             let member_id = $server.member_id();
             let server_name = $server.name();
             let rp = match $payload.payload {
-                rumor::RumorPayload::Membership(ref membership) => format!(
+                rumor::RumorPayload::Member(ref membership) => format!(
                     "{}-{}-{:?}",
                     membership.member.id, membership.member.incarnation, membership.health
                 ),

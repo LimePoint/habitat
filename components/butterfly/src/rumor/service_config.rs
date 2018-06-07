@@ -18,19 +18,15 @@
 
 use std::cmp::Ordering;
 use std::mem;
-use std::str;
+use std::str::{self, FromStr};
 
-use bytes::BytesMut;
 use habitat_core::crypto::{default_cache_key_path, BoxKeyPair};
 use habitat_core::service::ServiceGroup;
-use prost::Message;
 use toml;
 
 use error::{Error, Result};
-use protocol::{self,
-               swim::{rumor::Payload as RumorPayload, Rumor as ProtoRumor,
-                      ServiceConfig as ProtoServiceConfig}};
-use rumor::{Rumor, RumorType};
+use protocol::{self, newscast::Rumor as ProtoRumor, FromProto};
+use rumor::{Rumor, RumorPayload, RumorType};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceConfig {
@@ -99,41 +95,24 @@ impl ServiceConfig {
     }
 }
 
-impl protocol::Message for ServiceConfig {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = ProtoRumor::decode(bytes)?;
+impl protocol::Message<ProtoRumor> for ServiceConfig {}
+
+impl FromProto<ProtoRumor> for ServiceConfig {
+    fn from_proto(rumor: ProtoRumor) -> Result<Self> {
         let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
             RumorPayload::ServiceConfig(payload) => payload,
             _ => panic!("from-bytes service-config"),
         };
         Ok(ServiceConfig {
             from_id: rumor.from_id.ok_or(Error::ProtocolMismatch("from-id"))?,
-            service_group: rumor
+            service_group: payload
                 .service_group
-                .ok_or(Error::ProtocolMismatch("service-group"))?
-                .and_then(ServiceGroup::from_str)?,
-            incarnation: rumor.incarnation.unwrap_or(0),
-            encrypted: rumor.initialized.unwrap_or(false),
-            config: rumor.config.unwrap_or_default(),
+                .ok_or(Error::ProtocolMismatch("service-group"))
+                .and_then(|s| ServiceGroup::from_str(&s).map_err(Error::from))?,
+            incarnation: payload.incarnation.unwrap_or(0),
+            encrypted: payload.encrypted.unwrap_or(false),
+            config: payload.config.unwrap_or_default(),
         })
-    }
-
-    fn write_to_bytes(&self) -> Result<Vec<u8>> {
-        let payload = ProtoServiceConfig {
-            service_group: Some(self.service_group.to_string()),
-            incarnation: Some(self.incarnation),
-            encrypted: Some(self.encrypted),
-            config: Some(self.config),
-        };
-        let rumor = ProtoRumor {
-            type_: self.kind() as i32,
-            tag: Vec::default(),
-            from_id: self.member_id.clone(),
-            payload: Some(RumorPayload::ServiceConfig(payload)),
-        };
-        let mut buf = BytesMut::with_capacity(rumor.encoded_len());
-        rumor.encode(&mut buf)?;
-        Ok(buf.to_vec())
     }
 }
 

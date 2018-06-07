@@ -45,7 +45,7 @@ pub use self::service::Service;
 pub use self::service_config::ServiceConfig;
 pub use self::service_file::ServiceFile;
 use error::{Error, Result};
-pub use protocol::swim::rumor::{Payload as RumorPayload, Type as RumorType};
+pub use protocol::newscast::{Rumor as ProtoRumor, RumorPayload, RumorType};
 use protocol::Message;
 
 /// The description of a `RumorKey`.
@@ -80,7 +80,7 @@ impl RumorKey {
 
 /// A representation of a Rumor; implemented by all the concrete types we share as rumors. The
 /// exception is the Membership rumor, since it's not actually a rumor in the same vein.
-pub trait Rumor: Message + Sized {
+pub trait Rumor: Message<ProtoRumor> + Sized {
     fn kind(&self) -> RumorType;
     fn key(&self) -> &str;
     fn id(&self) -> &str;

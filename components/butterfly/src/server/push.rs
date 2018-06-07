@@ -22,13 +22,15 @@ use std::thread;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use prost::Message;
+use prost::Message as ProstMessage;
 use time::SteadyTime;
 use zmq;
 
 use member::{Member, Membership};
 use message::swim::{Member as ProtoMember, Membership as ProtoMembership, Rumor as ProtoRumor,
                     Rumor_Type as ProtoRumor_Type};
+use protocol::newscast::Rumor as ProtoRumor;
+use protocol::Message;
 use rumor::{RumorKey, RumorPayload, RumorType};
 use server::timing::Timing;
 use server::Server;
@@ -179,16 +181,17 @@ impl PushWorker {
         'rumorlist: for ref rumor_key in rumors.iter() {
             let rumor_as_bytes = match rumor_key.kind {
                 RumorType::Member => {
-                    let send_rumor = match self.create_member_rumor(&rumor_key) {
-                        Some(rumor) => {
-                            trace_it!(GOSSIP: &self.server, TraceKind::SendRumor, &member.id, &rumor);
-                            rumor.into_proto()
-                        }
+                    let send_rumor: ProtoRumor = match self.create_member_rumor(&rumor_key) {
+                        Some(rumor) => rumor,
                         None => continue 'rumorlist,
                     };
-                    let mut buf = BytesMut::with_capacity(send_rumor.encoded_len());
-                    match send_rumor.encode(&mut buf) {
-                        Ok(()) => buf.to_vec(),
+                    // trace_it!(GOSSIP: &self.server,
+                    //           TraceKind::SendRumor,
+                    //           &member.id,
+                    //           &send_rumor);
+                    let mut bytes = BytesMut::with_capacity(send_rumor.encoded_len());
+                    match send_rumor.encode(&mut bytes) {
+                        Ok(()) => bytes.to_vec(),
                         Err(e) => {
                             println!(
                                 "Could not write our own rumor to bytes; abandoning \
@@ -331,7 +334,7 @@ impl PushWorker {
     }
 
     /// Given a rumorkey, creates a protobuf rumor for sharing.
-    fn create_member_rumor(&self, rumor_key: &RumorKey) -> Option<WireRumor> {
+    fn create_member_rumor(&self, rumor_key: &RumorKey) -> Option<ProtoRumor> {
         let mut member = None;
         self.server.member_list.with_member(&rumor_key.key(), |m| {
             if let Some(m) = m {
@@ -341,16 +344,18 @@ impl PushWorker {
         if member.is_none() {
             return None;
         }
-        let rumor = WireRumor {
-            type_: RumorType::Member,
-            from_id: self.server.member_id().to_string(),
-            payload: RumorPayload::Membership(Membership {
-                member: member.unwrap(),
-                health: self.server
-                    .member_list
-                    .health_of_by_id(&rumor_key.key())
-                    .unwrap(),
-            }),
+        let payload = Membership {
+            member: member.unwrap(),
+            health: self.server
+                .member_list
+                .health_of_by_id(&rumor_key.key())
+                .unwrap(),
+        };
+        let rumor = ProtoRumor {
+            type_: RumorType::Member as i32,
+            tag: vec![],
+            from_id: Some(self.server.member_id().to_string()),
+            payload: Some(RumorPayload::Member(payload.into())),
         };
         Some(rumor)
     }

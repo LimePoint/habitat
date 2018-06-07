@@ -30,9 +30,9 @@ use time::SteadyTime;
 use super::AckReceiver;
 use member::{Health, Member, Membership};
 use message::swim::{Ack, Ping, PingReq, Rumor_Type, Swim, Swim_Type};
+use protocol::swim::{Ack, Ping, PingReq, Swim, SwimPayload, SwimType};
 use rumor::{RumorKey, RumorType};
 use server::timing::Timing;
-use server::Server;
 use server::Server;
 use swim::{Ack, Ping, PingReq, Swim, SwimPayload, SwimType};
 use trace::TraceKind;
@@ -291,19 +291,15 @@ pub fn populate_membership_rumors(server: &Server, target: &Member, swim: &mut S
 /// Send a PingReq.
 pub fn pingreq(server: &Server, socket: &UdpSocket, pingreq_target: &Member, target: &Member) {
     let pingreq = PingReq {
+        membership: vec![],
         from: server.member.read().unwrap().clone(),
         target: target.clone(),
     };
-    let mut swim = Swim {
-        type_: SwimType::Pingreq,
-        membership: vec![],
-        payload: SwimPayload::PingReq(pingreq),
-    };
+    let mut swim: Swim = pingreq.into();
     let addr = pingreq_target.swim_socket_address();
     populate_membership_rumors(server, target, &mut swim);
-    let proto = swim.into_proto();
-    let mut buf = BytesMut::with_capacity(proto.encoded_len());
-    let bytes = match proto.encode(&mut buf) {
+    let mut buf = BytesMut::with_capacity(swim.encoded_len());
+    let bytes = match swim.encode(&mut buf) {
         Ok(()) => buf.to_vec(),
         Err(e) => {
             error!("Generating protocol message failed: {}", e);
@@ -357,18 +353,14 @@ pub fn ping(
         None
     };
     let ping = Ping {
+        membership: vec![],
         from: server.member.read().unwrap().clone(),
         forward_to: forward_to,
     };
-    let mut swim = Swim {
-        type_: SwimType::Ping,
-        membership: vec![],
-        payload: SwimPayload::Ping(ping),
-    };
+    let mut swim: Swim = ping.into();
     populate_membership_rumors(server, target, &mut swim);
-    let proto = swim.into_proto();
-    let mut buf = BytesMut::with_capacity(proto.encoded_len());
-    let bytes = match proto.encode(&mut buf) {
+    let mut buf = BytesMut::with_capacity(swim.encoded_len());
+    let bytes = match swim.encode(&mut buf) {
         Ok(()) => buf.to_vec(),
         Err(e) => {
             error!("Generating protocol message failed: {}", e);
@@ -412,10 +404,10 @@ pub fn forward_ack(
     );
     let member_id = msg.from.id.clone();
     let swim = Swim {
-        type_: SwimType::Ack,
-        membership: members,
-        payload: SwimPayload::Ack(msg),
-    }.into_proto();
+        type_: SwimType::Ack as i32,
+        membership: members.into_iter().map(Into::into).collect(),
+        payload: Some(SwimPayload::Ack(msg.into())),
+    };
     let mut buf = BytesMut::with_capacity(swim.encoded_len());
     let bytes = match swim.encode(&mut buf) {
         Ok(()) => buf.to_vec(),
@@ -445,22 +437,16 @@ pub fn ack(
     addr: SocketAddr,
     mut forward_to: Option<Member>,
 ) {
-    let ack = {
-        Ack {
-            from: server.member.read().unwrap().clone(),
-            forward_to: forward_to,
-        }
+    let ack = Ack {
+        membership: vec![],
+        from: server.member.read().unwrap().clone(),
+        forward_to: forward_to.map(Into::into),
     };
     let member_id = ack.from.id.clone();
-    let mut swim = Swim {
-        type_: SwimType::Ack,
-        membership: vec![],
-        payload: SwimPayload::Ack(ack),
-    };
+    let mut swim: Swim = ack.into();
     populate_membership_rumors(server, target, &mut swim);
-    let proto = swim.into_proto();
-    let mut buf = BytesMut::with_capacity(proto.encoded_len());
-    let bytes = match proto.encode(&mut buf) {
+    let mut buf = BytesMut::with_capacity(swim.encoded_len());
+    let bytes = match swim.encode(&mut buf) {
         Ok(()) => buf.to_vec(),
         Err(e) => {
             error!("Generating protocol message failed: {}", e);

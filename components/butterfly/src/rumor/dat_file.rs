@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
-use prost::Message;
 use rand::{thread_rng, Rng};
 
 use error::{Error, Result};
 use member::{MemberList, Membership};
+use protocol::{newscast::Rumor as ProtoRumor, Message};
 use rumor::{Departure, Election, ElectionUpdate, Rumor, RumorStore, Service, ServiceConfig,
             ServiceFile};
 use server::Server;
@@ -348,9 +348,7 @@ impl DatFile {
     {
         let mut total = 0;
         let mut len_buf = [0; 8];
-        let proto = membership.into_proto();
-        let mut bytes = BytesMut::with_capacity(proto.encoded_len());
-        proto.encode(&mut bytes).unwrap();
+        let bytes = membership.clone().write_to_bytes().unwrap();
         LittleEndian::write_u64(&mut len_buf, bytes.len() as u64);
         total += writer
             .write(&len_buf)

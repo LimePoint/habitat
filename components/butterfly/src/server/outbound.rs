@@ -23,18 +23,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use bytes::BytesMut;
 use prost::Message;
 use time::SteadyTime;
 
 use super::AckReceiver;
-use member::{Health, Member, Membership};
-use message::swim::{Ack, Ping, PingReq, Rumor_Type, Swim, Swim_Type};
-use protocol::swim::{Ack, Ping, PingReq, Swim, SwimPayload, SwimType};
+use member::{Health, Member};
+use protocol::swim::{Ack, Ping, PingReq, Swim};
 use rumor::{RumorKey, RumorType};
 use server::timing::Timing;
 use server::Server;
-use swim::{Ack, Ping, PingReq, Swim, SwimPayload, SwimType};
 use trace::TraceKind;
 
 /// How long to sleep between calls to `recv`.
@@ -212,30 +209,26 @@ impl Outbound {
         };
         loop {
             match self.rx_inbound.try_recv() {
-                Ok((real_addr, mut swim)) => {
-                    let mut ack_from = swim.mut_ack().take_from();
-
+                Ok((real_addr, mut ack)) => {
                     // If this was forwarded to us, we want to retain the address of the member who
                     // sent the ack, not the one we received on the socket.
-                    if !swim.ack.has_forward_to() {
-                        ack_from.address = real_addr.ip().to_string();
+                    if ack.forward_to.is_none() {
+                        ack.from.address = real_addr.ip().to_string();
                     }
-                    let is_departed = ack_from.departed;
-                    let ack_from_member: Member = ack_from.into();
-                    if member.id != ack_from_member.id {
-                        if is_departed {
-                            self.server.insert_member(ack_from_member, Health::Departed);
+                    if member.id != ack.from.id {
+                        if ack.from.departed {
+                            self.server.insert_member(ack.from, Health::Departed);
                         } else {
-                            self.server.insert_member(ack_from_member, Health::Alive);
+                            self.server.insert_member(ack.from, Health::Alive);
                         }
                         // Keep listening, we want the ack we expected
                         continue;
                     } else {
                         // We got the ack we are looking for; return.
-                        if is_departed {
-                            self.server.insert_member(ack_from_member, Health::Departed);
+                        if ack.from.departed {
+                            self.server.insert_member(ack.from, Health::Departed);
                         } else {
-                            self.server.insert_member(ack_from_member, Health::Alive);
+                            self.server.insert_member(ack.from, Health::Alive);
                         }
                         return true;
                     }
@@ -298,9 +291,8 @@ pub fn pingreq(server: &Server, socket: &UdpSocket, pingreq_target: &Member, tar
     let mut swim: Swim = pingreq.into();
     let addr = pingreq_target.swim_socket_address();
     populate_membership_rumors(server, target, &mut swim);
-    let mut buf = BytesMut::with_capacity(swim.encoded_len());
-    let bytes = match swim.encode(&mut buf) {
-        Ok(()) => buf.to_vec(),
+    let bytes = match swim.encode() {
+        Ok(bytes) => bytes,
         Err(e) => {
             error!("Generating protocol message failed: {}", e);
             return;
@@ -359,9 +351,8 @@ pub fn ping(
     };
     let mut swim: Swim = ping.into();
     populate_membership_rumors(server, target, &mut swim);
-    let mut buf = BytesMut::with_capacity(swim.encoded_len());
-    let bytes = match swim.encode(&mut buf) {
-        Ok(()) => buf.to_vec(),
+    let bytes = match swim.encode() {
+        Ok(bytes) => bytes,
         Err(e) => {
             error!("Generating protocol message failed: {}", e);
             return;
@@ -388,13 +379,7 @@ pub fn ping(
 }
 
 /// Forward an ack on.
-pub fn forward_ack(
-    server: &Server,
-    socket: &UdpSocket,
-    addr: SocketAddr,
-    members: Vec<Membership>,
-    msg: Ack,
-) {
+pub fn forward_ack(server: &Server, socket: &UdpSocket, addr: SocketAddr, msg: Ack) {
     trace_it!(
         SWIM: server,
         TraceKind::SendForwardAck,
@@ -403,14 +388,9 @@ pub fn forward_ack(
         &ack
     );
     let member_id = msg.from.id.clone();
-    let swim = Swim {
-        type_: SwimType::Ack as i32,
-        membership: members.into_iter().map(Into::into).collect(),
-        payload: Some(SwimPayload::Ack(msg.into())),
-    };
-    let mut buf = BytesMut::with_capacity(swim.encoded_len());
-    let bytes = match swim.encode(&mut buf) {
-        Ok(()) => buf.to_vec(),
+    let swim: Swim = msg.into();
+    let bytes = match swim.encode() {
+        Ok(bytes) => bytes,
         Err(e) => {
             error!("Generating protocol message failed: {}", e);
             return;
@@ -445,9 +425,8 @@ pub fn ack(
     let member_id = ack.from.id.clone();
     let mut swim: Swim = ack.into();
     populate_membership_rumors(server, target, &mut swim);
-    let mut buf = BytesMut::with_capacity(swim.encoded_len());
-    let bytes = match swim.encode(&mut buf) {
-        Ok(()) => buf.to_vec(),
+    let bytes = match swim.encode() {
+        Ok(bytes) => bytes,
         Err(e) => {
             error!("Generating protocol message failed: {}", e);
             return;

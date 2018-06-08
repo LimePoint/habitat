@@ -27,8 +27,6 @@ use time::SteadyTime;
 use zmq;
 
 use member::{Member, Membership};
-use message::swim::{Member as ProtoMember, Membership as ProtoMembership, Rumor as ProtoRumor,
-                    Rumor_Type as ProtoRumor_Type};
 use protocol::newscast::Rumor as ProtoRumor;
 use protocol::Message;
 use rumor::{RumorKey, RumorPayload, RumorType};

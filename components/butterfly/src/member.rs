@@ -15,140 +15,25 @@
 //! Tracks membership. Contains both the `Member` struct and the `MemberList`.
 
 use std::collections::{hash_map, HashMap};
-use std::fmt;
 use std::iter::IntoIterator;
-use std::net::SocketAddr;
 use std::ops::Deref;
 use std::result;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use bytes::BytesMut;
 use prost::Message;
 use rand::{thread_rng, Rng};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use time::SteadyTime;
-use uuid::Uuid;
 
-use error::{Error, Result};
-use protocol::newscast::Rumor as ProtoRumor;
-pub use protocol::swim::Health;
-use protocol::swim::{Member as ProtoMember, Membership as ProtoMembership};
-use protocol::FromProto;
-use rumor::{RumorKey, RumorPayload, RumorType};
+pub use protocol::swim::{Health, Member, Membership};
 
 /// How many nodes do we target when we need to run PingReq.
 const PINGREQ_TARGETS: usize = 5;
 
 // This is a Uuid type turned to a string
 pub type UuidSimple = String;
-
-impl FromStr for Health {
-    type Err = Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        match value.to_lowercase().as_ref() {
-            "alive" => Ok(Health::Alive),
-            "suspect" => Ok(Health::Suspect),
-            "confirmed" => Ok(Health::Confirmed),
-            "departed" => Ok(Health::Departed),
-            value => panic!("No match for Health from string, {}", value),
-        }
-    }
-}
-
-impl fmt::Display for Health {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let value = match *self {
-            Health::Alive => "alive",
-            Health::Suspect => "suspect",
-            Health::Confirmed => "confirmed",
-            Health::Departed => "departed",
-        };
-        write!(f, "{}", value)
-    }
-}
-
-/// A member in the swim group. Passes most of its functionality along to the internal protobuf
-/// representation.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Member {
-    pub id: String,
-    pub incarnation: u64,
-    pub address: String,
-    pub swim_port: i32,
-    pub gossip_port: i32,
-    pub persistent: bool,
-    pub departed: bool,
-}
-
-impl Member {
-    /// Returns the socket address of this member.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if the address is un-parseable. In practice, it shouldn't be
-    /// un-parseable, since its set from the inbound socket directly.
-    pub fn swim_socket_address(&self) -> SocketAddr {
-        let address_str = format!("{}:{}", self.address, self.swim_port);
-        match address_str.parse() {
-            Ok(addr) => addr,
-            Err(e) => {
-                panic!("Cannot parse member {:?} address: {}", self, e);
-            }
-        }
-    }
-}
-
-impl Default for Member {
-    fn default() -> Self {
-        Member {
-            id: Uuid::new_v4().simple().to_string(),
-            incarnation: 0,
-            address: String::default(),
-            swim_port: 0,
-            gossip_port: 0,
-            persistent: false,
-            departed: false,
-        }
-    }
-}
-
-impl From<Member> for RumorKey {
-    fn from(member: Member) -> RumorKey {
-        RumorKey::new(RumorType::Member, member.id, "")
-    }
-}
-
-impl<'a> From<&'a Member> for RumorKey {
-    fn from(member: &'a Member) -> RumorKey {
-        RumorKey::new(RumorType::Member, member.id, "")
-    }
-}
-
-impl<'a> From<&'a &'a Member> for RumorKey {
-    fn from(member: &'a &'a Member) -> RumorKey {
-        RumorKey::new(RumorType::Member, member.id, "")
-    }
-}
-
-impl FromProto<ProtoMember> for Member {
-    fn from_proto(proto: ProtoMember) -> Result<Self> {
-        Ok(Member {
-            id: proto.id.ok_or(Error::ProtocolMismatch("id"))?,
-            incarnation: proto.incarnation.unwrap_or(0),
-            address: proto.address.ok_or(Error::ProtocolMismatch("address"))?,
-            swim_port: proto.swim_port.ok_or(Error::ProtocolMismatch("swim-port"))?,
-            gossip_port: proto
-                .gossip_port
-                .ok_or(Error::ProtocolMismatch("gossip-port"))?,
-            persistent: proto.persistent.unwrap_or(false),
-            departed: proto.departed.unwrap_or(false),
-        })
-    }
-}
 
 /// Tracks lists of members, their health, and how long they have been suspect.
 #[derive(Debug, Clone)]
@@ -634,63 +519,6 @@ impl MemberList {
             .read()
             .expect("Member list lock is poisoned")
             .contains_key(member_id)
-    }
-}
-
-#[derive(Debug)]
-pub struct Membership {
-    pub member: Member,
-    pub health: Health,
-}
-
-impl Membership {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let rumor = ProtoRumor::decode(bytes)?;
-        let payload = match rumor.payload.ok_or(Error::ProtocolMismatch("payload"))? {
-            RumorPayload::Member(payload) => payload,
-            _ => panic!("from-bytes member"),
-        };
-        let member = payload.member.ok_or(Error::ProtocolMismatch("member"))?;
-        Ok(Membership {
-            member: Member {
-                id: member.id.ok_or(Error::ProtocolMismatch("id"))?,
-                incarnation: member.incarnation.unwrap_or(0),
-                address: member.address.ok_or(Error::ProtocolMismatch("address"))?,
-                swim_port: member
-                    .swim_port
-                    .ok_or(Error::ProtocolMismatch("swim-port"))?,
-                gossip_port: member
-                    .gossip_port
-                    .ok_or(Error::ProtocolMismatch("gossip-port"))?,
-                persistent: member.persistent.unwrap_or(false),
-                departed: member.departed.unwrap_or(false),
-            },
-            health: payload
-                .health
-                .and_then(Health::from_i32)
-                .unwrap_or(Health::Alive),
-        })
-    }
-
-    pub fn write_to_bytes(self) -> Result<Vec<u8>> {
-        let rumor: ProtoMembership = self.into();
-        let mut bytes = BytesMut::with_capacity(rumor.encoded_len());
-        Ok(bytes.to_vec())
-    }
-}
-
-impl FromProto<ProtoMembership> for Membership {
-    fn from_proto(proto: ProtoMembership) -> Result<Self> {
-        Ok(Membership {
-            member: proto
-                .member
-                .ok_or(Error::ProtocolMismatch("member"))
-                .and_then(Member::from_proto)?,
-            health: proto
-                .health
-                .and_then(Health::from_i32)
-                .unwrap_or(Health::Alive),
-        })
     }
 }
 

@@ -18,12 +18,11 @@ use std::mem;
 use std::path::{Path, PathBuf};
 
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::BytesMut;
 use rand::{thread_rng, Rng};
 
 use error::{Error, Result};
 use member::{MemberList, Membership};
-use protocol::{newscast::Rumor as ProtoRumor, Message};
+use protocol::Message;
 use rumor::{Departure, Election, ElectionUpdate, Rumor, RumorStore, Service, ServiceConfig,
             ServiceFile};
 use server::Server;

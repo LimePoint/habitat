@@ -23,7 +23,6 @@ use std::time::Duration;
 use time::SteadyTime;
 
 use member::Health;
-use message::swim::Rumor_Type;
 use rumor::{RumorKey, RumorType};
 use server::timing::Timing;
 use server::Server;

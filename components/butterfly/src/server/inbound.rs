@@ -24,10 +24,7 @@ use std::time::Duration;
 use prost::Message as ProstMessage;
 
 use super::AckSender;
-use error::Error;
-use member::{Health, Membership};
-use protocol::{swim::{Ack, Ping, PingReq, Swim, SwimPayload},
-               Message};
+use protocol::swim::{Ack, Health, Ping, PingReq, Swim, SwimKind};
 use server::{outbound, Server};
 use trace::TraceKind;
 
@@ -77,21 +74,19 @@ impl Inbound {
                         }
                     };
                     trace!("SWIM Message: {:?}", msg);
-                    match msg.payload {
-                        SwimPayload::Ping(proto) => {
-                            let ping = proto.into();
-                            if self.server.check_blacklist(ping.from.id) {
+                    match msg.kind {
+                        SwimKind::Ping(ping) => {
+                            if self.server.check_blacklist(&ping.from.id) {
                                 debug!(
                                     "Not processing message from {} - it is blacklisted",
                                     ping.from.id
                                 );
                                 continue;
                             }
-                            self.process_ping(addr, msg.membership, ping);
+                            self.process_ping(addr, ping);
                         }
-                        SwimPayload::Ack(proto) => {
-                            let ack = proto.into();
-                            if self.server.check_blacklist(ack.from.id) && ack.forward_to.is_none()
+                        SwimKind::Ack(ack) => {
+                            if self.server.check_blacklist(&ack.from.id) && ack.forward_to.is_none()
                             {
                                 debug!(
                                     "Not processing message from {} - it is blacklisted",
@@ -99,18 +94,17 @@ impl Inbound {
                                 );
                                 continue;
                             }
-                            self.process_ack(addr, msg.membership, ack);
+                            self.process_ack(addr, ack);
                         }
-                        SwimPayload::PingReq(proto) => {
-                            let pingreq = proto.into();
-                            if self.server.check_blacklist(pingreq.from.id) {
+                        SwimKind::PingReq(pingreq) => {
+                            if self.server.check_blacklist(&pingreq.from.id) {
                                 debug!(
                                     "Not processing message from {} - it is blacklisted",
                                     pingreq.from.id
                                 );
                                 continue;
                             }
-                            self.process_pingreq(addr, msg.membership, pingreq);
+                            self.process_pingreq(addr, pingreq);
                         }
                     }
                 }
@@ -136,20 +130,20 @@ impl Inbound {
     }
 
     /// Process pingreq messages.
-    fn process_pingreq(&self, addr: SocketAddr, members: Vec<Membership>, mut msg: PingReq) {
-        trace_it!(SWIM: &self.server, TraceKind::RecvPingReq, msg.from.id, addr, &msg);
+    fn process_pingreq(&self, addr: SocketAddr, mut msg: PingReq) {
+        trace_it!(SWIM: &self.server, TraceKind::RecvPingReq, &msg.from.id, addr, &msg);
         self.server
             .member_list
-            .with_member(msg.target().id, move |m| match m {
+            .with_member(&msg.target.id, move |m| match m {
                 Some(target) => {
                     // Set the route-back address to the one we received the pingreq from
-                    msg.from.address = Some(addr.ip().to_string());
+                    msg.from.address = addr.ip().to_string();
                     outbound::ping(
                         &self.server,
                         &self.socket,
                         target,
                         target.swim_socket_address(),
-                        msg.from,
+                        Some(msg.from),
                     );
                 }
                 None => {
@@ -160,13 +154,12 @@ impl Inbound {
     }
 
     /// Process ack messages; forwards to the outbound thread.
-    fn process_ack(&self, addr: SocketAddr, members: Vec<Membership>, mut msg: Ack) {
-        trace_it!(SWIM: &self.server, TraceKind::RecvAck, msg.from.id, addr, &msg);
+    fn process_ack(&self, addr: SocketAddr, mut msg: Ack) {
+        trace_it!(SWIM: &self.server, TraceKind::RecvAck, &msg.from.id, addr, &msg);
         trace!("Ack from {}@{}", msg.from.id, addr);
         if let Some(ref forward_to) = msg.forward_to {
-            if self.server.member_id != forward_to.id {
-                let forward_addr_str =
-                    format!("{}:{}", forward_to.address(), forward_to.swim_port());
+            if *self.server.member_id != forward_to.id {
+                let forward_addr_str = format!("{}:{}", forward_to.address, forward_to.swim_port);
                 let forward_to_addr = match forward_addr_str.parse() {
                     Ok(addr) => addr,
                     Err(e) => {
@@ -184,8 +177,8 @@ impl Inbound {
                     forward_to.id,
                     forward_to.address,
                 );
-                msg.from.address = Some(addr.ip().to_string());
-                outbound::forward_ack(&self.server, &self.socket, forward_to_addr, members, msg);
+                msg.from.address = addr.ip().to_string();
+                outbound::forward_ack(&self.server, &self.socket, forward_to_addr, msg);
                 return;
             }
         }
@@ -193,25 +186,25 @@ impl Inbound {
             Ok(()) => {}
             Err(e) => panic!("Outbound thread has died - this shouldn't happen: #{:?}", e),
         }
-        for membership in members {
+        for membership in msg.membership {
             self.server
                 .insert_member_from_rumor(membership.member, membership.health);
         }
     }
 
     /// Process ping messages.
-    fn process_ping(&self, addr: SocketAddr, members: Vec<Membership>, mut msg: Ping) {
-        trace_it!(SWIM: &self.server, TraceKind::RecvPing, msg.from.id, addr, &msg);
-        outbound::ack(&self.server, &self.socket, msg.from, addr, &msg.forward_to);
+    fn process_ping(&self, addr: SocketAddr, mut msg: Ping) {
+        trace_it!(SWIM: &self.server, TraceKind::RecvPing, &msg.from.id, addr, &msg);
+        outbound::ack(&self.server, &self.socket, &msg.from, addr, msg.forward_to);
         // Populate the member for this sender with its remote address
-        msg.from.address = Some(addr.ip().to_string());
+        msg.from.address = addr.ip().to_string();
         trace!("Ping from {}@{}", msg.from.id, addr);
         if msg.from.departed {
             self.server.insert_member(msg.from, Health::Departed);
         } else {
             self.server.insert_member(msg.from, Health::Alive);
         }
-        for membership in members {
+        for membership in msg.membership {
             self.server
                 .insert_member_from_rumor(membership.member, membership.health);
         }

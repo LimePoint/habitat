@@ -36,6 +36,7 @@ use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use prost::Message as ProstMessage;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
@@ -45,8 +46,26 @@ pub use self::service::Service;
 pub use self::service_config::ServiceConfig;
 pub use self::service_file::ServiceFile;
 use error::{Error, Result};
+use member::Membership;
 pub use protocol::newscast::{Rumor as ProtoRumor, RumorPayload, RumorType};
-use protocol::Message;
+use protocol::{FromProto, Message};
+
+#[derive(Debug, Clone, Serialize)]
+pub enum RumorKind {
+    Departure(Departure),
+    Election(Election),
+    ElectionUpdate(ElectionUpdate),
+    Membership(Membership),
+    Service(Service),
+    ServiceConfig(ServiceConfig),
+    ServiceFile(ServiceFile),
+}
+
+impl From<RumorPayload> for RumorKind {
+    fn from(value: RumorPayload) -> RumorKind {
+        match value {}
+    }
+}
 
 /// The description of a `RumorKey`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -261,6 +280,37 @@ where
     /// it will be.
     fn increment_update_counter(&self) {
         self.update_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RumorEnvelope {
+    pub type_: RumorType,
+    pub from_id: String,
+    pub kind: RumorKind,
+}
+
+impl RumorEnvelope {
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let proto = ProtoRumor::decode(bytes)?;
+        let type_ = RumorType::from_i32(proto.type_).ok_or(Error::ProtocolMismatch("type"))?;
+        let from_id = proto.from_id.ok_or(Error::ProtocolMismatch("from-id"))?;
+        let kind = match type_ {
+            RumorType::Departure => RumorKind::Departure(Departure::from_proto(proto)?),
+            RumorType::Election => RumorKind::Election(Election::from_proto(proto)?),
+            RumorType::ElectionUpdate => {
+                RumorKind::ElectionUpdate(ElectionUpdate::from_proto(proto)?)
+            }
+            RumorType::Member => RumorKind::Membership(Membership::from_proto(proto)?),
+            RumorType::Service => RumorKind::Service(Service::from_proto(proto)?),
+            RumorType::ServiceConfig => RumorKind::ServiceConfig(ServiceConfig::from_proto(proto)?),
+            RumorType::ServiceFile => RumorKind::ServiceFile(ServiceFile::from_proto(proto)?),
+        };
+        Ok(RumorEnvelope {
+            type_: type_,
+            from_id: from_id,
+            kind: kind,
+        })
     }
 }
 
